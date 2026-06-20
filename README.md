@@ -19,24 +19,27 @@ make
 make check
 ```
 
-The cartridge image is written to `build/squeepty.bin`. It is a plain 4K
-ROM with no bank switching.
+The downloadable cartridge image is written to `downloads/squeepty-2600-demo.bin`.
+It is a plain 4K ROM with no bank switching.
+
+[Download the ready-to-run ROM](downloads/squeepty-2600-demo.bin)
 
 ## Run
 
-Open `build/squeepty.bin` in Stella. The demo is automatic and has no
+Open `downloads/squeepty-2600-demo.bin` in Stella. The demo is automatic and has no
 controls.
 
 On macOS with Stella installed in `/Applications`:
 
 ```sh
-open -na Stella --args "$PWD/build/squeepty.bin"
+open -na Stella --args "$PWD/downloads/squeepty-2600-demo.bin"
 ```
 
 ## Layout
 
 - `src/demo.asm`: 6502/TIA program and display kernel
 - `tools/gen_assets.py`: converts small bitmap fonts into TIA playfield data
+- `downloads/squeepty-2600-demo.bin`: ready-to-run Atari 2600 cartridge image
 - `build/assets.inc`: generated title and scroll data
 - `BEGINNER_GUIDE.md`: detailed hardware, design, timing, and code walkthrough
 
