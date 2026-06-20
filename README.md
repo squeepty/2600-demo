@@ -44,6 +44,7 @@ open -na Stella --args "$PWD/downloads/squeepty-2600-demo.bin"
 - `downloads/squeepty-2600-demo.bin`: ready-to-run Atari 2600 cartridge image
 - `build/assets.inc`: generated title and scroll data
 - `BEGINNER_GUIDE.md`: detailed hardware, design, timing, and code walkthrough
+- `ASSEMBLY_HARDWARE_REFERENCE.md`: complete 6507 instruction, register, and TIA/RIOT address reference
 
 The kernel favors robust, readable effects over cycle-maximal tricks. The
 playfield text uses separate left and right writes on each scanline, while
