@@ -1,6 +1,6 @@
 # SQUEEPTY 2600 Demo
 
-Video here: (https://www.youtube.com/watch?v=SjKJ531LlC0)[https://www.youtube.com/watch?v=SjKJ531LlC0]
+Video here: [https://www.youtube.com/watch?v=SjKJ531LlC0](https://www.youtube.com/watch?v=SjKJ531LlC0)
 
 A small, deliberately first-demo-sized Atari 2600 ROM:
 
