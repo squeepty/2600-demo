@@ -2,6 +2,8 @@
 
 Video here: [https://www.youtube.com/watch?v=SjKJ531LlC0](https://www.youtube.com/watch?v=SjKJ531LlC0)
 
+Rom download: [squeepty-2600-demo.bin](https://github.com/squeepty/2600-demo/raw/refs/heads/main/downloads/squeepty-2600-demo.bin)
+
 A small, deliberately first-demo-sized Atari 2600 ROM:
 
 - color-cycling raster bars and title background
