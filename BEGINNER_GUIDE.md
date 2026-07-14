@@ -19,7 +19,7 @@ The ROM automatically displays:
 - a large asymmetric `SQUEEPTY` playfield title
 - an 8-row player sprite that bounces horizontally and vertically
 - a reflected checker playfield
-- a scrolling `HELLO FROM SQUEEPTY / 2600 DEMO` ticker
+- a scrolling `GREETINGS TO ALL ATARI DREAMERS...` ticker
 - a simple two-channel TIA melody
 
 There are no controls. The cartridge enters a permanent frame loop immediately
@@ -111,8 +111,8 @@ end scanline
 ```
 
 If code takes too long, a register update happens on the wrong side of the
-screen or spills into the next scanline. This is why the six `NOP` instructions
-in the title and ticker are meaningful: they position the right-half writes.
+screen or spills into the next scanline. This is why the title and ticker have
+explicit delay instructions: they position the right-half writes exactly.
 
 ### WSYNC
 
@@ -264,7 +264,7 @@ The demo uses 41 of the 128 RAM bytes:
 | `$86` | `ScrollTick` | 1 | Ticker speed divider |
 | `$87-$88` | `ScrollPtr` | 2 | Pointer to a generated scroll frame |
 | `$89` | `MusicStep` | 1 | Current music-table index |
-| `$8A` | `CheckerState` | 1 | Current checker phase |
+| `$8A` | `CheckerState` / `TitleBackground` | 1 | Shared title-color scratch byte, then current checker phase |
 | `$8B-$A8` | `ScrollBuffer` | 30 | Current ticker image |
 
 The stack begins at the top of its mirrored RAM area and grows downward. This
@@ -277,12 +277,12 @@ Addresses from the current build are:
 
 | Address range | Contents | Bytes |
 | --- | --- | ---: |
-| `$F000-$F267` | Program code | 616 |
-| `$F268-$F2FF` | Alignment padding | 152 |
+| `$F000-$F281` | Program code | 642 |
+| `$F282-$F2FF` | Alignment padding | 126 |
 | `$F300-$F36D` | Colors, sprite, checker, and music | 110 |
 | `$F36E-$F397` | Generated title data | 42 |
-| `$F398-$FC43` | Generated ticker frames | 2220 |
-| `$FC44-$FFFB` | Unused ROM space | 952 |
+| `$F398-$FD6F` | Generated ticker frames | 2520 |
+| `$FD70-$FFFB` | Unused ROM space | 652 |
 | `$FFFC-$FFFF` | Reset and IRQ/BRK vectors | 4 |
 
 The addresses can move when code or data changes. `build/squeepty.sym` shows
@@ -309,7 +309,8 @@ The display remains blank because `VBLANK` is still enabled.
 
 ### 8.2 VBLANK Timer
 
-Writing 43 to `TIM64T` starts a timer measured in 64-cycle units:
+Writing 44 to `TIM64T` starts a timer measured in 64-cycle units. The RIOT
+decrements once immediately after the load, leaving 43 complete intervals:
 
 ```text
 43 * 64 = 2752 CPU cycles
@@ -349,7 +350,8 @@ The final `WSYNC` closes the last bottom bar.
 
 ### 8.4 Overscan Timer
 
-The code enables `VBLANK`, writes 35 to `TIM64T`, and waits:
+The code enables `VBLANK`, writes 36 to `TIM64T`, and waits. After the immediate
+first decrement, 35 complete intervals remain:
 
 ```text
 35 * 64 = 2240 CPU cycles
@@ -474,27 +476,32 @@ position of 32 uses lines 32 through 39, exactly reaching the bottom.
 
 ### 10.4 Ticker Speed and Pointer
 
-The ticker advances when:
+The ticker advances when its frame counter reaches 10:
 
 ```asm
-ScrollTick AND 7 = 0
+inc ScrollTick
+lda ScrollTick
+cmp #10
+bcc .copyScrollFrame
+lda #0
+sta ScrollTick
 ```
 
-That occurs every eight frames. Each generated frame shifts the source by two
+That occurs every ten frames. Each generated frame shifts the source by two
 logical playfield pixels.
 
 At approximately 60 video frames per second:
 
 ```text
-60 / 8 = 7.5 ticker frames per second
-7.5 * 2 = 15 logical playfield pixels per second
+60 / 10 = 6 ticker frames per second
+6 * 2 = 12 logical playfield pixels per second
 ```
 
-The source row is 147 pixels wide, producing 74 generated frames. A complete
+The source row is 167 pixels wide, producing 84 generated frames. A complete
 loop therefore lasts about:
 
 ```text
-74 frames * 8 video frames / 60 = 9.9 seconds
+84 frames * 10 video frames / 60 = 14.0 seconds
 ```
 
 Each ticker frame is 30 bytes. Advancing the pointer uses 16-bit addition:
@@ -560,16 +567,21 @@ of the write determines the coarse X position.
 
 ### 11.1 Coarse Position
 
-After a `WSYNC`, the routine repeatedly subtracts 15:
+After a `WSYNC`, the routine sets carry and repeatedly subtracts 15:
 
 ```asm
+    sta WSYNC
+    sec
 .divide
     sbc #15
     bcs .divide
 ```
 
 Each loop consumes time corresponding to a horizontal step. More loops delay
-the `RESP0` write and place the player farther right.
+the `RESP0` write and place the player farther right. `SEC` deliberately runs
+after `WSYNC`: its two cycles keep the smallest `RESP0` strobes out of the
+TIA's special horizontal-blank timing case, so the left bounce advances one
+pixel per frame instead of jumping at the coarse/fine boundary.
 
 ### 11.2 Fine Position
 
@@ -642,8 +654,10 @@ near screen center:
 ```
 
 By the time the right values are written, the TIA has already drawn the left
-half. The six `NOP` instructions delay the second group of writes until the
-correct horizontal time.
+half. The normal ticker path uses six `NOP` instructions for a 12-cycle delay.
+The title writes its cached background color during horizontal blank, then
+uses `BIT` plus three `NOP`s for a 9-cycle delay. That three-cycle reduction
+keeps its right-half writes at the same cycles as the ticker.
 
 The common repeated path takes about 59 cycles after `WSYNC`, leaving margin
 inside the 76-cycle scanline.
@@ -855,7 +869,7 @@ Approximate rates at 60 frames per second:
 | Sprite X/Y | 1 frame | 60 position steps/second |
 | Checker starting phase | 4 frames | 15 changes/second |
 | Hue | 8 frames | 7.5 changes/second |
-| Ticker | 8 frames | 7.5 frames/second |
+| Ticker | 10 frames | 6 frames/second |
 | Music | 16 frames | 3.75 note changes/second |
 
 `FrameCounter` wraps every 256 frames, or roughly 4.27 seconds.
@@ -918,14 +932,14 @@ build/assets.inc
                          v
                        DASM
                          |
-            +------------+-------------+
-            v            v             v
-build/squeepty.bin  build/squeepty.lst  build/squeepty.sym
+                  +----------------+-------------+
+                  v                v             v
+downloads/squeepty-2600-demo.bin  build/squeepty.lst  build/squeepty.sym
 ```
 
 Files:
 
-- `build/squeepty.bin`: the 4096-byte cartridge image
+- `downloads/squeepty-2600-demo.bin`: the 4096-byte cartridge image
 - `build/squeepty.lst`: source mixed with addresses and machine-code bytes
 - `build/squeepty.sym`: label-to-address map
 - `build/assets.inc`: generated playfield bytes
@@ -942,36 +956,38 @@ make check
 To run it on macOS:
 
 ```sh
-open -na Stella --args "$PWD/build/squeepty.bin"
+open -na Stella --args "$PWD/downloads/squeepty-2600-demo.bin"
 ```
 
 ## 19. Safe Experiments
 
 ### 19.1 Change Scroll Speed
 
-The current code advances when:
+The current code increments `ScrollTick` each video frame and advances when it
+reaches 10:
 
 ```asm
-and #7
+cmp #10
 ```
 
-Useful masks are:
+Change that comparison value to tune the speed:
 
-| Mask | Advance interval |
+| Comparison | Advance interval |
 | ---: | ---: |
-| `#1` | 2 frames |
-| `#3` | 4 frames |
-| `#7` | 8 frames |
-| `#15` | 16 frames |
+| `#8` | 8 frames |
+| `#10` | 10 frames |
+| `#12` | 12 frames |
+| `#16` | 16 frames |
 
-This works because each mask is one less than a power of two.
+Smaller values scroll faster; larger values scroll slower. The code resets
+`ScrollTick` to zero whenever the selected interval is reached.
 
 ### 19.2 Change the Ticker Message
 
 Edit:
 
 ```python
-message = "   HELLO FROM SQUEEPTY / 2600 DEMO   "
+message = "    GREETINGS TO ALL ATARI DREAMERS...    "
 ```
 
 in `tools/gen_assets.py`.
@@ -979,8 +995,9 @@ in `tools/gen_assets.py`.
 Every character must exist in `TICKER_FONT`. Add a 3-by-5 glyph if needed.
 Then run `make`.
 
-Longer messages consume more ROM. There are currently about 952 unused bytes,
-which is enough for roughly 31 additional 30-byte ticker frames.
+Longer messages consume more ROM. Each three-pixel glyph plus its one-pixel
+spacing creates two 30-byte frames, or 60 bytes per character. The current
+42-character message leaves 652 bytes, enough for 10 additional characters.
 
 ### 19.3 Change the Sprite
 
@@ -1028,8 +1045,9 @@ and keep the result at 192.
 
 ### 19.8 Change Title or Ticker Timing
 
-Treat the six `NOP` instructions as timing-critical. Changing their number can
-move the right-half playfield rewrite and visibly split or distort text.
+Treat both delay sequences as timing-critical: six `NOP`s in the normal ticker
+path, and `BIT` plus three `NOP`s in the title. Changing either total can move
+the right-half playfield rewrite and visibly split or distort text.
 
 Use Stella's debugger or scanline visualization when modifying visible-kernel
 instruction timing.
@@ -1135,7 +1153,7 @@ Benefits:
 
 Cost:
 
-- 2220 bytes of ROM
+- 2520 bytes of ROM
 
 ### RAM Buffer vs. Direct ROM Reads
 

@@ -2,11 +2,14 @@ DASM ?= dasm
 PYTHON ?= python3
 
 ROM := downloads/squeepty-2600-demo.bin
+RELEASE_ZIP := downloads/SQUEEPTY_2600_Demo.zip
 LIST := build/squeepty.lst
 SYMBOLS := build/squeepty.sym
 ASSETS := build/assets.inc
+RELEASE_STAGE := build/release/SQUEEPTY_2600_Demo
+RELEASE_FILES := release/README.txt release/SQUEEPTY.NFO release/FILE_ID.DIZ
 
-.PHONY: all clean check
+.PHONY: all clean check release
 
 all: $(ROM)
 
@@ -26,6 +29,17 @@ $(ROM): src/demo.asm $(ASSETS) | downloads
 check: $(ROM)
 	@printf "ROM: %s bytes\n" "$$(wc -c < $(ROM) | tr -d ' ')"
 	@shasum -a 256 $(ROM)
+
+release: $(RELEASE_ZIP)
+
+$(RELEASE_ZIP): $(ROM) $(RELEASE_FILES) | downloads
+	rm -rf $(RELEASE_STAGE)
+	mkdir -p $(RELEASE_STAGE)
+	cp $(ROM) $(RELEASE_STAGE)/SQUEEPTY.BIN
+	cp $(RELEASE_FILES) $(RELEASE_STAGE)/
+	cd build/release && zip -X -q -r ../../$(RELEASE_ZIP) SQUEEPTY_2600_Demo
+	@printf "Release archive: %s\n" "$(RELEASE_ZIP)"
+	@unzip -t $(RELEASE_ZIP)
 
 clean:
 	rm -rf build

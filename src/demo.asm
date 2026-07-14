@@ -101,6 +101,7 @@ ScrollTick      ds 1    ; $86: divides the frame rate for slower scrolling
 ScrollPtr       ds 2    ; $87-$88: little-endian pointer to one ROM frame
 MusicStep       ds 1    ; $89: index into the two 16-byte note tables
 CheckerState    ds 1    ; $8A: selects one of two checker patterns
+TitleBackground = CheckerState ; shared scratch before checker setup overwrites it
 ScrollBuffer    ds 30   ; $8B-$A8: current 5-row asymmetric ticker frame
 
 ; -----------------------------------------------------------------------------
@@ -187,10 +188,11 @@ Frame
     sta VSYNC
 
 ; --- 37 lines of vertical blank ----------------------------------------------
-; 43 timer ticks * 64 cycles = 2752 cycles, about 36.2 scanlines. The final
-; WSYNC rounds that up to 37. Animation and horizontal positioning happen
-; while VBLANK hides their intermediate register changes.
-    lda #43
+; The RIOT decrements once immediately after a timer load. Loading 44 therefore
+; leaves 43 full 64-cycle intervals: 2752 cycles, about 36.2 scanlines. The
+; final WSYNC aligns the region to 37 lines. Animation and horizontal
+; positioning happen while VBLANK hides their intermediate register changes.
+    lda #44
     sta TIM64T
     jsr UpdateState
     jsr PositionPlayer
@@ -206,11 +208,12 @@ Frame
     jsr DrawScreen
 
 ; --- 30 lines of overscan -----------------------------------------------------
-; Blank the beam immediately after the visible kernel. 35 * 64 = 2240 cycles,
-; about 29.5 scanlines, and the closing WSYNC rounds the region to 30.
+; Blank the beam immediately after the visible kernel. Loading 36 leaves 35
+; full 64-cycle intervals: 2240 cycles, about 29.5 scanlines. The closing WSYNC
+; aligns the region to 30 lines.
     lda #2
     sta VBLANK
-    lda #35
+    lda #36
     sta TIM64T
 .waitOverscan
     lda INTIM
@@ -286,14 +289,16 @@ UpdateState
 ; animation step. Each image moves the message by two logical playfield pixels
 ; and occupies 30 bytes: 5 text rows * 6 playfield-register values.
 ;
-; Advance to the next image every 8 video frames. AND 7 is a compact modulo-8
-; test. At roughly 60 Hz, this is 7.5 animation frames/second, or 15 logical
+; Advance to the next image every 10 video frames. The counter is reset when it
+; reaches 10. At roughly 60 Hz, this is 6 animation frames/second, or 12 logical
 ; playfield pixels/second because each animation frame moves by two pixels.
 .scroll
     inc ScrollTick
     lda ScrollTick
-    and #7
-    bne .copyScrollFrame
+    cmp #10
+    bcc .copyScrollFrame
+    lda #0
+    sta ScrollTick
 
 ; ScrollPtr += 30. The low-byte addition may set carry, and ADC #0 propagates
 ; that carry into the high byte. This is standard 16-bit addition on a 6502.
@@ -365,8 +370,9 @@ UpdateState
 
 PositionPlayer
     lda SpriteX             ; requested horizontal coordinate
-    sec                     ; first SBC must not borrow
     sta WSYNC               ; begin coarse positioning on a fresh scanline
+    sec                     ; first SBC must not borrow; this two-cycle delay
+                            ; keeps RESP0 out of its special HBLANK timing case
 .divide
     sbc #15                 ; each taken loop delays the RESP0 strobe
     bcs .divide             ; continue while the subtraction did not underflow
@@ -437,10 +443,13 @@ DrawScreen
 ; Large SQUEEPTY title - 7 bitmap rows * 6 scanlines = 42 scanlines
 ; -----------------------------------------------------------------------------
 ; Hue contains only a hue nibble. ORA supplies luminance bits; EOR offsets the
-; title hue from its background so they remain visually distinct.
+; title hue from its background so they remain visually distinct. Cache the
+; background in CheckerState's RAM byte; the checker initializes that byte
+; again before it is used. COLUPF is safe to change on the last raster line
+; because PF0/PF1/PF2 are all zero there.
     lda Hue
     ora #$02
-    sta COLUBK
+    sta TitleBackground
     lda Hue
     eor #$80
     ora #$0C
@@ -449,7 +458,9 @@ DrawScreen
 .titleRow
     ldx #6                 ; repeat each source row vertically six times
 .titleLine
+    lda TitleBackground
     sta WSYNC
+    sta COLUBK              ; cycle 3: safely inside horizontal blank
 
 ; A playfield is 20 bits wide and normally repeats or mirrors to make 40 bits.
 ; To draw a unique 40-bit title, write PF0/PF1/PF2 for the left half early in
@@ -463,11 +474,10 @@ DrawScreen
     lda TitlePF2L,y
     sta PF2
 
-; Six NOPs consume 12 CPU cycles. They are timing, not wasted work: removing or
-; adding one moves the right-half update horizontally and can damage the text.
-    nop
-    nop
-    nop
+; The background write shifted the left-half work by three cycles. BIT plus
+; three NOPs delays nine cycles, keeping every right-half write at its original
+; cycle. These instructions are timing, not wasted work.
+    bit TitleBackground
     nop
     nop
     nop
@@ -541,10 +551,6 @@ DrawScreen
     cpx #40
     bne .spriteLine
 
-; Explicitly turn the player off before entering the next display region.
-    lda #0
-    sta GRP0
-
 ; -----------------------------------------------------------------------------
 ; Animated checker playfield - 32 scanlines
 ; -----------------------------------------------------------------------------
@@ -566,12 +572,16 @@ DrawScreen
 
 ; CTRLPF bit 0 reflects the 20-bit left playfield onto the right half. Unlike
 ; the title and ticker, the checker is symmetrical and needs only one set of
-; PF0/PF1/PF2 writes per scanline.
-    lda #1
-    sta CTRLPF
+; PF0/PF1/PF2 writes per scanline. Clear GRP0 and set reflection after WSYNC,
+; safely inside horizontal blank. This preserves the sprite's last row through
+; the end of line 39 and keeps the sprite-to-checker handoff below 76 cycles.
     ldx #0
 .checkerLine
     sta WSYNC
+    lda #0
+    sta GRP0
+    lda #1
+    sta CTRLPF
     lda CheckerPF0,y
     sta PF0
     lda CheckerPF1,y
@@ -632,13 +642,30 @@ DrawScreen
 ;     25..29  right PF2
 ;
 ; With Y as the text-row index, adding 5 selects the next register block.
-    lda #0
-    sta COLUBK
+; Set the foreground while the playfield is zero on the last middle-bar line.
+; The first ticker line is specialized so COLUBK changes only after WSYNC,
+; inside horizontal blank, without shifting the right-half playfield writes.
     lda Hue
     eor #$60
     ora #$0E
     sta COLUPF
     ldy #0
+    ldx #5
+    lda ScrollBuffer,y
+    sta WSYNC
+    sty COLUBK              ; Y is zero: black at cycle 3
+    sta PF0                 ; first left PF0 was preloaded before WSYNC
+    lda ScrollBuffer+5,y
+    sta PF1
+    lda ScrollBuffer+10,y
+    sta PF2
+    nop
+    nop
+    nop
+    nop
+    nop
+    jmp .tickerRight
+
 .tickerRow
     ldx #5                 ; repeat each source row vertically five times
 .tickerLine
@@ -654,13 +681,14 @@ DrawScreen
     lda ScrollBuffer+10,y
     sta PF2
 
-; Keep this six-NOP delay synchronized with the corresponding title delay.
+; Six NOPs place the normal path's right-half writes at cycles 40/47/54.
     nop
     nop
     nop
     nop
     nop
     nop
+.tickerRight
     lda ScrollBuffer+15,y
     sta PF0
     lda ScrollBuffer+20,y
@@ -676,13 +704,12 @@ DrawScreen
 ; -----------------------------------------------------------------------------
 ; Bottom raster bars - 19 scanlines
 ; -----------------------------------------------------------------------------
-; RainbowReverse gives the lower border a complementary direction. The extra
-; WSYNC after the loop closes the nineteenth bar exactly at a scanline edge;
-; Frame then enables VBLANK for overscan.
-    lda #0
-    sta PF0
-    sta PF1
-    sta PF2
+; RainbowReverse gives the lower border a complementary direction. The ticker
+; playfield bits remain latched, but assigning the same color to COLUBK and
+; COLUPF makes them invisible. Both color writes happen during horizontal blank,
+; and moving all setup after WSYNC lets the final ticker path reach the boundary
+; before cycle 76. The extra WSYNC after the loop closes the nineteenth bar
+; exactly at a scanline edge; Frame then enables VBLANK for overscan.
     ldx #18
 .bottomBars
     sta WSYNC
@@ -693,6 +720,7 @@ DrawScreen
     tay
     lda RainbowReverse,y
     sta COLUBK
+    sta COLUPF
     dex
     bpl .bottomBars
     sta WSYNC

@@ -85,7 +85,7 @@ change, their named flag. **Used** is based on `src/demo.asm`.
 | `BCC` | Branch if C is clear | tests C | Yes |
 | `BCS` | Branch if C is set | tests C | Yes |
 | `BEQ` | Branch if Z is set | tests Z | No |
-| `BIT` | Test A against memory; copy memory bit 7/6 to N/V | N Z V | No |
+| `BIT` | Test A against memory; copy memory bit 7/6 to N/V | N Z V | Yes |
 | `BMI` | Branch if N is set | tests N | No |
 | `BNE` | Branch if Z is clear | tests Z | Yes |
 | `BPL` | Branch if N is clear | tests N | Yes |
@@ -128,7 +128,7 @@ change, their named flag. **Used** is based on `src/demo.asm`.
 | `SEI` | Set interrupt disable | I | Yes |
 | `STA` | Store A to memory or hardware | — | Yes |
 | `STX` | Store X | — | No |
-| `STY` | Store Y | — | No |
+| `STY` | Store Y | — | Yes |
 | `TAX` | Copy A to X | N Z | Yes |
 | `TAY` | Copy A to Y | N Z | Yes |
 | `TSX` | Copy SP to X | N Z | No |
@@ -140,11 +140,11 @@ change, their named flag. **Used** is based on `src/demo.asm`.
 
 | Group | Mnemonics | Role in the source |
 | --- | --- | --- |
-| Transfer | `LDA LDX LDY STA TAX TAY TXA TXS` | Move state, data, and table indexes between CPU, RAM, TIA, and RIOT. |
-| Arithmetic/bit shaping | `ADC SBC INC ASL LSR AND ORA EOR` | Sprite motion, pointer advance, palette modulo, color construction, and fine-motion encoding. |
+| Transfer | `LDA LDX LDY STA STY TAX TAY TXA TXS` | Move state, data, and table indexes between CPU, RAM, TIA, and RIOT. |
+| Arithmetic/bit shaping | `ADC SBC INC ASL LSR AND ORA EOR BIT` | Sprite motion, pointer advance, palette modulo, color construction, fine-motion encoding, and an exact three-cycle title delay. |
 | Comparisons/control | `CMP CPX CPY BCC BCS BNE BPL JMP JSR RTS` | Sprite bounds, loops, polling, and routine calls. |
 | Flag setup | `CLC SEC CLD SEI` | Establish add/subtract semantics and a known reset state. |
-| Display timing | `NOP` | Six NOPs delay title/ticker right-half playfield writes by 12 CPU cycles. |
+| Display timing | `NOP` | Completes the title's 9-cycle and ticker's 12-cycle right-half delays. |
 
 The two most important carry idioms are:
 
@@ -306,9 +306,9 @@ One NTSC frame is 262 lines, at 76 CPU cycles (228 color clocks) per line.
 | Region | Lines | Relevant actions |
 | --- | ---: | --- |
 | VSYNC | 3 | `VBLANK=$02`, `VSYNC=$02`, then three `WSYNC` writes; clear `VSYNC`. |
-| VBLANK | 37 | Start `TIM64T=43`, update state and position P0 while blanked, poll `INTIM`, clear `VBLANK` at a line boundary. |
+| VBLANK | 37 | Start `TIM64T=44`, update state and position P0 while blanked, poll `INTIM`, clear `VBLANK` at a line boundary. |
 | Visible | 192 | `DrawScreen` races the beam, changing color/playfield/player registers. |
-| Overscan | 30 | Set `VBLANK`, start `TIM64T=35`, poll, `WSYNC`, restart frame. |
+| Overscan | 30 | Set `VBLANK`, start `TIM64T=36`, poll, `WSYNC`, restart frame. |
 
 `WSYNC` is the scanline metronome. It stores nothing useful: it simply holds
 the CPU until the next line begins, so code immediately after it runs near the
@@ -339,8 +339,9 @@ TIA has 20 playfield bits per half. Each bit is four color clocks wide.
 With `CTRLPF` bit 0 clear, that left 20-bit pattern repeats on the right.
 With it set, it mirrors. The checker uses `CTRLPF=$01`; title and ticker need
 40 independent bits, so use `CTRLPF=$00` and rewrite `PF0-PF2` near the
-center of each line. Six `NOP` instructions create the horizontal delay
-between left and right writes.
+center of each line. The ticker uses six `NOP`s for its horizontal delay. The
+title uses `BIT` plus three `NOP`s because its horizontal-blank background
+write already consumes three cycles.
 
 ### Player 0 roles
 
@@ -354,8 +355,10 @@ The TIA has no ordinary X/Y coordinate registers.
 
 `PositionPlayer` repeatedly subtracts 15 from `SpriteX` to move the
 `RESP0` strobe in coarse chunks, converts the remainder for `HMP0`, and
-strobes `HMOVE` on the next scanline. It runs during VBLANK, so intermediate
-timing is invisible.
+strobes `HMOVE` on the next scanline. `SEC` follows `WSYNC` so its two cycles
+keep the low-coordinate `RESP0` write out of the TIA's special HBLANK case;
+this makes the left bounce continuous. The routine runs during VBLANK, so
+intermediate timing is invisible.
 
 ## 10. Audio behavior
 
@@ -381,10 +384,10 @@ move.
 | `$83` | `SpriteDX` | 1 | Horizontal delta: 1 or `$FF` (-1). |
 | `$84` | `SpriteY` | 1 | Sprite top inside 40-line sprite region. |
 | `$85` | `SpriteDY` | 1 | Vertical delta. |
-| `$86` | `ScrollTick` | 1 | Eight-frame ticker-speed divider. |
+| `$86` | `ScrollTick` | 1 | Ten-frame ticker-speed divider. |
 | `$87-$88` | `ScrollPtr` | 2 | Little-endian pointer to selected 30-byte ticker frame in ROM. |
 | `$89` | `MusicStep` | 1 | Current 0-15 note-table index. |
-| `$8A` | `CheckerState` | 1 | Selects one of two checker patterns. |
+| `$8A` | `CheckerState` / `TitleBackground` | 1 | Holds cached title background, then one of two checker patterns. |
 | `$8B-$A8` | `ScrollBuffer` | 30 | Current 5-row, six-register ticker image. |
 
 ### RIOT register map
@@ -399,11 +402,13 @@ move.
 | `$0285` | `TIMINT` | Timer underflow/interrupt status. | No |
 | `$0294` | `TIM1T` | Start timer: 1 CPU cycle per decrement. | No |
 | `$0295` | `TIM8T` | Start timer: 8 CPU cycles per decrement. | No |
-| `$0296` | `TIM64T` | Start timer: 64 CPU cycles per decrement. Written as 43 (VBLANK) and 35 (overscan). | Yes, write |
+| `$0296` | `TIM64T` | Start timer: 64 CPU cycles per decrement. Written as 44 (VBLANK) and 36 (overscan). | Yes, write |
 | `$0297` | `T1024T` | Start timer: 1024 CPU cycles per decrement. | No |
 
-The code polls only until `INTIM` first reaches zero, then writes `WSYNC`
-to round the blank region up to a clean scanline boundary.
+The RIOT performs its first decrement immediately after the load, so values 44
+and 36 leave 43 and 35 complete 64-cycle intervals. The code polls only until
+`INTIM` first reaches zero, then writes `WSYNC` to round the blank region up to
+a clean scanline boundary.
 
 ## 12. Reading map for the source
 
@@ -419,4 +424,3 @@ to round the blank region up to a clean scanline boundary.
 For a narrative walkthrough of the current effects and frame construction, see
 [`BEGINNER_GUIDE.md`](BEGINNER_GUIDE.md). This file is intended as the
 complete instruction/register/address lookup while editing the assembly.
-

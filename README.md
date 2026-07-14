@@ -2,7 +2,7 @@
 
 Video here: [https://www.youtube.com/watch?v=SjKJ531LlC0](https://www.youtube.com/watch?v=SjKJ531LlC0)
 
-Rom download: [squeepty-2600-demo.bin](https://github.com/squeepty/2600-demo/raw/refs/heads/main/downloads/squeepty-2600-demo.bin)
+Download: [submission ZIP](downloads/SQUEEPTY_2600_Demo.zip) | [ROM only](https://github.com/squeepty/2600-demo/raw/refs/heads/main/downloads/squeepty-2600-demo.bin)
 
 A small, deliberately first-demo-sized Atari 2600 ROM:
 
@@ -10,7 +10,7 @@ A small, deliberately first-demo-sized Atari 2600 ROM:
 - large `SQUEEPTY` playfield title
 - horizontally and vertically bouncing player sprite
 - animated checker playfield
-- short scrolling `HELLO FROM SQUEEPTY / 2600 DEMO` ticker
+- scrolling `GREETINGS TO ALL ATARI DREAMERS...` ticker
 - simple two-voice TIA melody
 - fixed 262-scanline NTSC frame
 
@@ -21,12 +21,14 @@ Install [DASM](https://dasm-assembler.github.io/), then run:
 ```sh
 make
 make check
+make release
 ```
 
 The downloadable cartridge image is written to `downloads/squeepty-2600-demo.bin`.
 It is a plain 4K ROM with no bank switching.
 
-[Download the ready-to-run ROM](downloads/squeepty-2600-demo.bin)
+[Download the ready-to-run submission ZIP](downloads/SQUEEPTY_2600_Demo.zip) or the
+[ROM on its own](downloads/squeepty-2600-demo.bin).
 
 ## Run
 

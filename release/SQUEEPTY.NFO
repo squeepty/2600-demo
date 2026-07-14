@@ -1,0 +1,33 @@
+-------------------------------------------------------------------------------
+                            SQUEEPTY 2600 DEMO
+-------------------------------------------------------------------------------
+
+                         a tiny Atari 2600 demo
+
+  Released : 20 June 2026
+  Platform : Atari 2600 / Atari VCS (NTSC)
+  Format   : 4K cartridge ROM, no bank switching
+  Controls : none - sit back and let it run
+
+  Credits
+  -------
+  Squeepty .......................... code, visuals, music
+
+  What is inside
+  --------------
+  * cycling raster bars and title background
+  * SQUEEPTY playfield logo
+  * bouncing player sprite
+  * animated checker field and scrolling ticker
+  * two-voice TIA tune
+  * a fixed 262-scanline NTSC frame
+
+  Run SQUEEPTY.BIN in Stella or on suitable NTSC Atari 2600 hardware.
+
+  The archive contains the ROM, README, NFO and FILE_ID.DIZ. Source and notes:
+  https://github.com/squeepty/2600-demo
+
+  Video capture:
+  https://www.youtube.com/watch?v=SjKJ531LlC0
+
+-------------------------------------------------------------------------------
