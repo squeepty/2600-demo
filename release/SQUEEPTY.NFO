@@ -1,26 +1,57 @@
 -------------------------------------------------------------------------------
-                            SQUEEPTY 2600 DEMO
+                    THE TEENY-TINY ATARI 2600 DEMO
 -------------------------------------------------------------------------------
 
                          a tiny Atari 2600 demo
 
-  Released : 20 June 2026
+  Released : Thursday, July 16, 2026
   Platform : Atari 2600 / Atari VCS (NTSC)
-  Format   : 4K cartridge ROM, no bank switching
-  Controls : none - sit back and let it run
+  Format   : 4096-byte 4K cartridge ROM, no bank switching
+  Controls : none - the demo runs automatically and reads no input
 
   Credits
   -------
-  Squeepty .......................... code, visuals, music
+  Squeepty .......................... code, visuals, TIA adaptation
+  Lloyd Russell ..................... original Jukebox type-in
 
-  What is inside
-  --------------
-  * cycling raster bars and title background
-  * SQUEEPTY playfield logo
-  * bouncing player sprite
-  * animated checker field and scrolling ticker
-  * two-voice TIA tune
-  * a fixed 262-scanline NTSC frame
+  Opening sequence
+  ----------------
+  The one-time first scene reveals one major layer every 256 frames:
+
+    stage 1   SQUEEPTY title
+    stage 2   checker/grid
+    stage 3   bouncing spaceship and moving starfield
+    stage 4   compact scrolling ticker
+
+  Scene two starts when stage four ends. There is no extra 1,024-frame hold
+  on the completed first scene.
+
+  Four scenes
+  -----------
+  1. static title       alien/diamond, classic checks, slow stars
+  2. type on and off    robot, digital blocks, medium stars
+  3. horizontal ripple  UFO, narrow bands, fast stars
+  4. vertical wave      space jellyfish, chunky blocks, reverse stars
+
+  The scene-specific player sprites bounce in both axes. Checker patterns
+  animate, sparse star planes move behind the sprites, and regular scene
+  changes use a 256-frame luminance fade.
+
+  Sound
+  -----
+  The 66.75-second, two-channel TIA adaptation of Take On Me is derived from
+  Jukebox by Lloyd Russell, published as a type-in in Your Sinclair issue 21,
+  September 1987, for the ZX Spectrum 128K. Channel 0 carries the selected AY
+  lead voice and channel 1 carries the bass. Compact duration, pitch, waveform
+  and volume events update once per NTSC frame, independently of the visual
+  scene counter, and loop at the end.
+
+  Also inside
+  -----------
+  * flowing top, middle and bottom raster bars
+  * color-cycling background behind the 40-bit SQUEEPTY playfield title
+  * five-row GREETINGS TO ALL ATARI DREAMERS... ticker, stored compactly
+  * fixed 262-line NTSC frames: 3 sync, 37 blank, 192 visible, 30 overscan
 
   Run SQUEEPTY.BIN in Stella or on suitable NTSC Atari 2600 hardware.
 

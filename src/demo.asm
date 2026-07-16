@@ -1,5 +1,6 @@
 ; =============================================================================
-; SQUEEPTY - a small NTSC Atari 2600 demo
+; The Teeny-tiny Atari 2600 demo - a 4 KiB NTSC production
+; Released Thursday, July 16, 2026
 ; =============================================================================
 ;
 ; This file is assembled by DASM for the 6507 CPU inside the Atari 2600.
@@ -26,6 +27,15 @@
 ; pauses the CPU until the beginning of the next scanline, which makes it the
 ; basic timing tool used throughout DrawScreen.
 ;
+; Visual choreography derives from DemoFrame, with title sub-effects using
+; FrameCounter at 8- or 16-frame rates. On power-up, four 256-frame stages
+; reveal the title, checker, sprite/starfield, and ticker one at a time. The
+; fourth stage hands directly to scene 2. The visual scene sequencer completes
+; scenes 2-4, wraps through scene 1, and repeats all four scenes in order. The
+; independent two-channel soundtrack uses its own per-frame event timers.
+;
+; This is a passive demo: it reads no joystick or console-switch registers.
+;
 ; Useful DASM/6502 syntax seen below:
 ;
 ;     #10       immediate value 10, rather than memory address 10
@@ -37,6 +47,13 @@
 ;     (Ptr),y   16-bit address stored at Ptr, plus index register Y
 ;
     processor 6502
+
+; Number of video frames for which each two-pixel ticker position is shown.
+; The initial value is one larger because UpdateState decrements the counter
+; before the first visible frame; both initial and later positions remain on
+; screen for ten complete frames.
+SCROLL_DELAY         = 10
+SCROLL_INITIAL_DELAY = SCROLL_DELAY + 1
 
 ; -----------------------------------------------------------------------------
 ; TIA write registers
@@ -81,9 +98,10 @@ TIM64T  = $0296 ; write here to start a 64-cycle-interval countdown
 ; -----------------------------------------------------------------------------
 ; RAM layout
 ; -----------------------------------------------------------------------------
-; The Atari 2600 has only 128 bytes of RAM at $80-$FF. This demo uses $80-$A8,
-; or 41 bytes. ScrollBuffer is deliberately in RAM because the visible ticker
-; kernel needs fast, simple indexed reads; its source animation lives in ROM.
+; The Atari 2600 has only 128 bytes of RAM at $80-$FF. This demo uses $80-$CB,
+; or 76 bytes. ScrollBuffer is deliberately in RAM because the visible ticker
+; kernel needs fast, simple indexed reads. VBLANK code shifts that buffer while
+; the compact source columns remain in ROM.
 ;
 ; "ds N" reserves N bytes. SEG.U means an uninitialized segment: these labels
 ; describe RAM addresses but do not put bytes into the cartridge image.
@@ -97,12 +115,36 @@ SpriteX         ds 1    ; $82: player horizontal position
 SpriteDX        ds 1    ; $83: horizontal delta, either +1 or $FF (-1)
 SpriteY         ds 1    ; $84: top scanline of the sprite inside its region
 SpriteDY        ds 1    ; $85: vertical delta, either +1 or $FF (-1)
-ScrollTick      ds 1    ; $86: divides the frame rate for slower scrolling
-ScrollPtr       ds 2    ; $87-$88: little-endian pointer to one ROM frame
-MusicStep       ds 1    ; $89: index into the two 16-byte note tables
-CheckerState    ds 1    ; $8A: selects one of two checker patterns
+ScrollTick      ds 1    ; $86: 10-frame divider for two-column scroll updates
+ScrollPtr       ds 2    ; $87-$88: pointer to the next packed ticker column
+CheckerForeground ds 1 ; $89: checker color cached before its first WSYNC
+CheckerState    ds 1    ; $8A: scene pattern base plus current checker phase
 TitleBackground = CheckerState ; shared scratch before checker setup overwrites it
-ScrollBuffer    ds 30   ; $8B-$A8: current 5-row asymmetric ticker frame
+ScrollBits       = CheckerState ; VBLANK-only source-column scratch byte
+BottomBarColor   = CheckerState ; cached after checker use and before ticker draw
+ScrollBuffer    ds 30   ; $8B-$A8: six register blocks * five ticker rows
+DemoFrame       ds 2    ; $A9-$AA: 0..4095 main-scene frame counter
+TopBarsLast     ds 1    ; $AB: inclusive final index for the 15 top bars
+TitleGapCount   ds 1    ; $AC: six-line gap below the fixed title region
+TitleFrame      ds 1    ; $AD: first row of selected 7-row generated phase
+TitleFrameEnd   ds 1    ; $AE: exclusive end row for that generated phase
+ScenePattern    ds 1    ; $AF: 0/64/128/192 visual-table offset and scene ID
+SpriteBuffer    ds 8    ; $B0-$B7: active scene sprite copied during VBLANK
+TransitionStep  ds 1    ; $B8: low byte of 256-frame fade countdown
+TransitionMask  ds 1    ; $B9: AND mask applied to every visible color
+TransitionStepHi ds 1   ; $BA: high byte, one only for countdown value 256
+StarPtr0        ds 2    ; $BB-$BC: active 32-byte source for PF0 stars
+StarPtr1        ds 2    ; $BD-$BE: active 32-byte source for PF1 stars
+StarPtr2        ds 2    ; $BF-$C0: active 32-byte source for PF2 stars
+StarMode        ds 1    ; $C1: scene-specific starfield speed/direction, 0..3
+IntroActive     ds 1    ; $C2: nonzero only during one-time component reveal
+IntroStage      ds 1    ; $C3: 0 title, 1 grid, 2 sprite/stars, 3 ticker, 4 done
+MusicPtr0       ds 2    ; $C4-$C5: Take On Me melody event pointer
+MusicPtr1       ds 2    ; $C6-$C7: Take On Me bass event pointer
+MusicTimer0     ds 1    ; $C8: melody frames remaining
+MusicTimer1     ds 1    ; $C9: bass frames remaining
+CheckerBackground ds 1 ; $CA: background cached before its first checker WSYNC
+CheckerHue      ds 1    ; $CB: grid hue clock, advanced at half the old rate
 
 ; -----------------------------------------------------------------------------
 ; Cartridge ROM
@@ -147,26 +189,36 @@ Reset
     sta SpriteY
     lda #1
     sta SpriteDY
+    sta IntroActive
 
-; ScrollPtr is a 16-bit little-endian pointer. "<" extracts the low address
-; byte and ">" extracts the high byte.
-    lda #<ScrollFrames
+; UpdateState runs before the first visible frame. Starting one above the
+; regular delay lets the initial image, like every later two-column position,
+; remain visible for ten complete frames before it shifts.
+    lda #SCROLL_INITIAL_DELAY
+    sta ScrollTick
+
+; ScrollPtr is a 16-bit little-endian pointer to the first source column just
+; beyond the initial 40-bit window. "<" and ">" select its address bytes.
+    lda #<ScrollNextColumn
     sta ScrollPtr
-    lda #>ScrollFrames
+    lda #>ScrollNextColumn
     sta ScrollPtr+1
 
-; Configure the one hardware player and the TIA's two sound channels.
+; Seed the RAM image that the visible ticker kernel reads. Later updates shift
+; this same encoded buffer in place, so no complete animation frames are kept
+; in the cartridge.
+    ldy #29
+.loadScrollBuffer
+    lda ScrollInitial,y
+    sta ScrollBuffer,y
+    dey
+    bpl .loadScrollBuffer
+
+; Configure the one hardware player and initialize the soundtrack.
 ; NUSIZ0=$05 makes the 8-bit player twice its normal width.
     lda #$05
     sta NUSIZ0
-    lda #$04
-    sta AUDC0
-    lda #$06
-    sta AUDC1
-    lda #4
-    sta AUDV0
-    lda #2
-    sta AUDV1
+    jsr TakeOnMe_Init
 
 ; =============================================================================
 ; Frame - permanent 262-scanline main loop
@@ -230,6 +282,47 @@ Frame
 UpdateState
     inc FrameCounter         ; 8-bit increment naturally wraps $FF -> $00
 
+; The main show is a 4,096-frame ring: 1,024 frames apiece for scene 1/static,
+; scene 2/type-on-off, scene 3/ripple, and scene 4/vertical wave. The intro also
+; uses DemoFrame, then deliberately hands off at $0400 so scene 2 follows its
+; fourth 256-frame reveal stage without replaying scene 1 for another cycle.
+    inc DemoFrame
+    bne .keepDemoFrameHigh
+    inc DemoFrame+1
+.keepDemoFrameHigh
+    lda IntroActive
+    beq .checkDemoLoop
+    jsr UpdateIntro
+    jmp .chooseTitleEffect
+.checkDemoLoop
+    lda DemoFrame+1
+    cmp #$10
+    bne .chooseTitleEffect
+    lda DemoFrame
+    cmp #$00
+    bne .chooseTitleEffect
+    lda #0
+    sta DemoFrame
+    sta DemoFrame+1
+
+.chooseTitleEffect
+; Derive the checker hue from bits 5-8 of DemoFrame. LSR places counter bit 8
+; in carry and ROR shifts it above bits 7-1, producing the low byte of
+; DemoFrame/2. Its high nibble therefore advances every 32 frames while still
+; visiting all 16 TIA hue families over a complete 512-frame color cycle.
+    lda DemoFrame+1
+    lsr
+    lda DemoFrame
+    ror
+    and #$F0
+    sta CheckerHue
+
+    jsr UpdateTransition
+    jsr UpdateTitleEffect
+    jsr LoadStarPattern
+.loadStageSprite
+    jsr LoadSpriteFrame
+
 ; Change the base hue once every 8 frames. Because 8 is a power of two,
 ; FrameCounter AND 7 is zero exactly when the low three bits are all zero.
 ; TIA NTSC colors put the hue mainly in the high nibble, so adding $10 walks
@@ -252,9 +345,11 @@ UpdateState
     adc SpriteDX
     sta SpriteX
 
-; At the right edge, select -1 for future frames. At the left edge, select +1.
+; At the right edge, select -1 for future frames. Player 0 is 16 color clocks
+; wide in double-width mode, so X=130 leaves the same 14-clock margin between
+; its right edge and the 160-clock screen boundary as X=14 leaves on the left.
 ; The current position is retained, so the visible range includes the boundary.
-    cmp #146
+    cmp #130
     bcc .checkLeft
     lda #$FF
     sta SpriteDX
@@ -285,73 +380,344 @@ UpdateState
     sta SpriteDY
 
 ; --- Scrolling ticker --------------------------------------------------------
-; The asset generator precomputes a complete 40-bit playfield image for each
-; animation step. Each image moves the message by two logical playfield pixels
-; and occupies 30 bytes: 5 text rows * 6 playfield-register values.
-;
-; Advance to the next image every 10 video frames. The counter is reset when it
-; reaches 10. At roughly 60 Hz, this is 6 animation frames/second, or 12 logical
-; playfield pixels/second because each animation frame moves by two pixels.
+; ScrollBuffer is a 40-bit-wide image encoded in the TIA's unusual PF0/PF1/PF2
+; bit orders. Every tenth video frame, shift each of its five rows left twice
+; and inject two successive five-bit source columns at the right. At roughly
+; 60 Hz this advances 12 logical playfield pixels per second. Keeping the
+; original two-pixel cadence avoids horizontal edge persistence in emulators
+; while the compact column stream still saves cartridge space.
 .scroll
-    inc ScrollTick
-    lda ScrollTick
-    cmp #10
-    bcc .copyScrollFrame
-    lda #0
+    dec ScrollTick
+    bne .music
+    lda #SCROLL_DELAY
     sta ScrollTick
 
-; ScrollPtr += 30. The low-byte addition may set carry, and ADC #0 propagates
-; that carry into the high byte. This is standard 16-bit addition on a 6502.
-    clc
-    lda ScrollPtr
-    adc #30
-    sta ScrollPtr
-    lda ScrollPtr+1
-    adc #0
-    sta ScrollPtr+1
+    jsr .shiftScrollOne
+    jsr .shiftScrollOne
+    jmp .music
 
-; If the pointer reached the byte immediately after the last generated frame,
-; wrap it back to the first frame. Comparing high byte first is a quick reject.
-; Equality is sufficient because every advance is exactly one 30-byte frame.
-    cmp #>ScrollFramesEnd
-    bne .copyScrollFrame
-    lda ScrollPtr
-    cmp #<ScrollFramesEnd
-    bne .copyScrollFrame
-    lda #<ScrollFrames
-    sta ScrollPtr
-    lda #>ScrollFrames
-    sta ScrollPtr+1
-
-; Copy the selected ROM frame into RAM every video frame, even when ScrollPtr
-; did not advance. This keeps the visible kernel simple and deterministic.
-;
-; Y counts backward from 29 to 0. After DEY changes 0 into $FF, the negative
-; flag becomes set and BPL ("branch if plus") stops the loop.
-.copyScrollFrame
-    ldy #29
-.copyByte
+; Each ROM byte supplies one vertical column: bits 4 through 0 hold ticker rows
+; 0 through 4. Fetch it before advancing the pointer.
+.shiftScrollOne
+    ldy #0
     lda (ScrollPtr),y
-    sta ScrollBuffer,y
-    dey
-    bpl .copyByte
+    sta ScrollBits
+
+; Increment the 16-bit pointer by one. If the low byte wraps, increment the high
+; byte too, then wrap the complete pointer at the end of the circular stream.
+    inc ScrollPtr
+    bne .checkScrollEnd
+    inc ScrollPtr+1
+.checkScrollEnd
+    lda ScrollPtr+1
+    cmp #>ScrollColumnsEnd
+    bne .shiftScroll
+    lda ScrollPtr
+    cmp #<ScrollColumnsEnd
+    bne .shiftScroll
+    lda #<ScrollColumns
+    sta ScrollPtr
+    lda #>ScrollColumns
+    sta ScrollPtr+1
+
+; Shift one row through the six hardware-register bytes. Their display order is
+; PF0 bits 4->7, PF1 bits 7->0, and PF2 bits 0->7 on each screen half, so the
+; rotate direction alternates. After right PF0 shifts, its old visible bit 4 is
+; temporarily in bit 3; five ASLs move that boundary bit into carry for left
+; PF2. PF0's unused low nibbles may collect discarded bits, but the TIA ignores
+; them and right shifts can never move them back into the visible high nibble.
+; X descends with ScrollBits: bit 0 feeds row 4 first, through bit 4 for row 0.
+.shiftScroll
+    ldx #4
+.shiftScrollRow
+    lsr ScrollBits
+    ror ScrollBuffer+25,x
+    rol ScrollBuffer+20,x
+    ror ScrollBuffer+15,x
+    lda ScrollBuffer+15,x
+    asl
+    asl
+    asl
+    asl
+    asl
+    ror ScrollBuffer+10,x
+    rol ScrollBuffer+5,x
+    ror ScrollBuffer,x
+    dex
+    bpl .shiftScrollRow
+    rts
 
 ; --- Two-channel music -------------------------------------------------------
-; Update the pitch dividers once every 16 video frames (about 3.75 times per
-; second). Both tables contain 16 entries, so AND 15 wraps MusicStep cheaply.
-; AUDC0/AUDC1 and both volumes were configured once during Reset.
-    lda FrameCounter
-    and #15
-    bne .audioDone
-    inc MusicStep
-    lda MusicStep
-    and #15
+; The converted ZX Spectrum arrangement has independent event durations for
+; both voices, so its player advances once per NTSC frame.
+.music
+    jsr TakeOnMe_Update
+    rts
+
+; =============================================================================
+; UpdateIntro - reveal one major component per 256-frame stage
+; =============================================================================
+; IntroStage starts at zero, so the complete static title is visible first.
+; Exact 256-frame milestones reveal the checker at $0100, the sprite/starfield
+; at $0200, and the ticker at $0300. At $0400 the fourth reveal stage is
+; complete: clear IntroActive, preserve the normal scene geometry, and set
+; DemoFrame=$0400 to choose scene 2. The soundtrack has its own frame timers
+; and is intentionally independent of these visual boundaries. Hidden
+; components still consume their normal scanlines in DrawScreen, so the NTSC
+; frame always remains exactly 262 lines.
+UpdateIntro
+    lda DemoFrame+1
+    cmp #$04
+    bne .checkIntroMilestones
+    lda DemoFrame
+    cmp #$00                ; 1,024 frames: hand off directly to scene two
+    bne .checkIntroMilestones
+    lda #0
+    sta IntroActive
+    sta DemoFrame
+    lda #$04                ; skip scene one's additional 1,024-frame hold
+    sta DemoFrame+1
+    lda #4
+    sta IntroStage
+    rts
+.checkIntroMilestones
+    ldx #2
+.introMilestoneLoop
+    lda DemoFrame+1
+    cmp IntroMilestoneHigh,x
+    bne .nextIntroMilestone
+    lda DemoFrame
+    cmp IntroMilestoneLow,x
+    bne .nextIntroMilestone
+    inc IntroStage
+    rts
+.nextIntroMilestone
+    dex
+    bpl .introMilestoneLoop
+    rts
+
+; =============================================================================
+; UpdateTransition - fade out before and fade in after each regular scene boundary
+; =============================================================================
+; A transition begins 128 frames before each 1,024-frame boundary and lasts 256
+; frames. Four progressively stricter masks remove luminance bits; the effect
+; switch occurs in the dark center, then the masks relax in reverse. Each entry
+; in the 128-byte curve lasts two frames. The one-time component reveal bypasses
+; this countdown and uses the full-luminance $FE mask; its $0400 handoff to
+; scene 2 is intentionally immediate rather than another fade.
+
+UpdateTransition
+    lda IntroActive
+    beq .updateNormalTransition
+    lda #$FE
+    sta TransitionMask
+    rts
+.updateNormalTransition
+    lda TransitionStepHi
+    bne .ageTransition
+    lda TransitionStep
+    beq .checkTransitionStart
+.ageTransition
+    lda TransitionStep
+    bne .decrementTransitionLow
+    dec TransitionStepHi
+.decrementTransitionLow
+    dec TransitionStep
+.checkTransitionStart
+    ldx #3
+.transitionStartLoop
+    lda DemoFrame+1
+    cmp TransitionStartHigh,x
+    bne .nextTransitionStart
+    lda DemoFrame
+    cmp TransitionStartLow,x
+    bne .nextTransitionStart
+    lda #0
+    sta TransitionStep
+    lda #1
+    sta TransitionStepHi
+    bne .selectTransitionMask
+.nextTransitionStart
+    dex
+    bpl .transitionStartLoop
+
+.selectTransitionMask
+    lda TransitionStepHi
+    bne .firstTransitionMask
+    lda TransitionStep
+    beq .fullLuminance
+    sec
+    sbc #1
+    lsr
     tax
-    lda Melody,x
-    sta AUDF0
-    lda Bass,x
-    sta AUDF1
-.audioDone
+    lda TransitionMasks,x
+    sta TransitionMask
+    rts
+.firstTransitionMask
+    ldx #127
+    lda TransitionMasks,x
+    sta TransitionMask
+    rts
+.fullLuminance
+    lda #$FE                ; TIA luminances are even; this preserves all bits
+    sta TransitionMask
+    rts
+
+; =============================================================================
+; UpdateTitleEffect - select the current 1,024-frame scene
+; =============================================================================
+; TopBarsLast+1 and TitleGapCount total 21 scanlines. All title motion is
+; precomputed inside the fixed seven-row region, leaving the display kernel
+; and its 192-line height unchanged.
+;
+;   DemoFrame $0000-$03FF: scene 1, static title, ScenePattern 0
+;             $0400-$07FF: scene 2, type on/off, ScenePattern 64
+;             $0800-$0BFF: scene 3, horizontal ripple, ScenePattern 128
+;             $0C00-$0FFF: scene 4, vertical wave, ScenePattern 192
+;
+; ScenePattern is the shared visual selector used later for the sprite bitmap,
+; checker pair, star-plane permutation, and scene-specific animation behavior.
+
+UpdateTitleEffect
+    lda #14
+    sta TopBarsLast
+    lda #6
+    sta TitleGapCount
+    lda #84                ; complete undistorted reveal phase
+    sta TitleFrame
+    lda #91
+    sta TitleFrameEnd
+    lda #0
+    sta ScenePattern
+
+; The progressive introduction uses the complete static title throughout.
+    lda IntroActive
+    beq .checkStaticStage
+    rts
+
+; DemoFrame < 1024 ($0400): leave the defaults above for a static title.
+.checkStaticStage
+    lda DemoFrame+1
+    cmp #$04
+    bcs .checkRippleStage
+    rts
+
+; DemoFrame < 2048 ($0800): reveal letters, then remove them in reverse.
+.checkRippleStage
+    lda DemoFrame+1
+    cmp #$08
+    bcc .titleType
+    bne .checkVerticalStage
+    lda DemoFrame
+    cmp #$00
+    bcc .titleType
+
+; DemoFrame < 3072 ($0C00): select the horizontal ripple.
+.checkVerticalStage
+    lda DemoFrame+1
+    cmp #$0C
+    bcc .titleRipple
+    bne .titleVertical
+    lda DemoFrame
+    cmp #$00
+    bcc .titleRipple
+
+; DemoFrame >= 3072: keep the title region fixed and use a separate vertical
+; wave that moves only the precomputed letters (no horizontal ripple).
+.titleVertical
+    lda #192
+    sta ScenePattern
+    lda FrameCounter
+    lsr
+    lsr
+    lsr                     ; advance the letter wave every 16 frames
+    lsr
+    and #3
+    tay
+    lda VerticalFrameOffsets,y
+    sta TitleFrame
+    clc
+    adc #7
+    sta TitleFrameEnd
+    rts
+
+.titleType
+    lda #64
+    sta ScenePattern
+    lda FrameCounter
+    lsr
+    lsr
+    lsr
+    lsr
+    and #15
+    tay
+    lda RevealFrameOffsets,y
+    sta TitleFrame
+    clc
+    adc #7
+    sta TitleFrameEnd
+    rts
+
+.titleRipple
+    lda #128
+    sta ScenePattern
+    lda FrameCounter
+    lsr
+    lsr
+    lsr
+    and #7
+    tay
+    lda RippleFrameOffsets,y
+    sta TitleFrame
+    clc
+    adc #7
+    sta TitleFrameEnd
+.titleEffectDone
+    rts
+
+; Copy the current scene's eight-byte sprite into RAM during VBLANK. Keeping
+; the visible kernel's bitmap load simple is essential when the player is near
+; the left edge, where GRP0 must be written before the beam reaches it.
+LoadSpriteFrame
+    lda ScenePattern
+    lsr
+    lsr
+    lsr                     ; 0,64,128,192 -> bitmap offsets 0,8,16,24
+    tay
+    ldx #0
+.copySpriteFrame
+    lda SpriteBitmaps,y
+    sta SpriteBuffer,x
+    iny
+    inx
+    cpx #8
+    bne .copySpriteFrame
+    rts
+
+; Remap the same three sparse star planes for each scene. All three tables live
+; on one ROM page, so only their low pointer bytes vary. StarMode also gives
+; each scene a different vertical speed or direction: slow, medium, fast, then
+; medium-speed reverse. No 16-bit pointer addition is needed in the kernel.
+LoadStarPattern
+    lda ScenePattern
+    lsr
+    lsr
+    lsr
+    lsr
+    lsr
+    lsr
+    tay
+    sty StarMode
+    lda StarPlane0Low,y
+    sta StarPtr0
+    lda StarPlane1Low,y
+    sta StarPtr1
+    lda StarPlane2Low,y
+    sta StarPtr2
+    lda #>StarPF0
+    sta StarPtr0+1
+    sta StarPtr1+1
+    sta StarPtr2+1
     rts
 
 ; =============================================================================
@@ -407,6 +773,9 @@ PositionPlayer
 ;   ---
 ;   192
 ;
+; All four scenes use these same region heights. Intro-hidden regions execute
+; counted WSYNC loops of the same height.
+;
 ; The first WSYNC below closes the setup line. Each later WSYNC closes the
 ; effect line produced after the previous WSYNC. The final WSYNC closes the
 ; last bottom bar before RTS returns to overscan.
@@ -419,22 +788,26 @@ DrawScreen
     sta PF1
     sta PF2
     sta CTRLPF
+    sta GRP0
 
 ; -----------------------------------------------------------------------------
 ; Top raster bars - 15 scanlines
 ; -----------------------------------------------------------------------------
 ; The table index is (line + FrameCounter) modulo 32. AND 31 performs modulo
 ; because the table has a power-of-two length. Advancing FrameCounter shifts
-; the palette by one entry each video frame and creates flowing color.
-    ldx #14
+; the palette by one entry each video frame and creates flowing color. Compute
+; each color on the preceding scanline, then write COLUBK immediately after
+; WSYNC; this prevents a stale-color strip at the visible left edge.
+    ldx TopBarsLast
 .topBars
-    sta WSYNC
     txa
     clc
     adc FrameCounter
     and #31
     tay
     lda Rainbow,y
+    and TransitionMask
+    sta WSYNC
     sta COLUBK
     dex
     bpl .topBars
@@ -447,14 +820,35 @@ DrawScreen
 ; background in CheckerState's RAM byte; the checker initializes that byte
 ; again before it is used. COLUPF is safe to change on the last raster line
 ; because PF0/PF1/PF2 are all zero there.
+; Ripple and vertical-wave scenes use the same four-times-slower background
+; hue cadence as the ticker. ScenePattern has bit 7 set only for those scenes.
+    lda ScenePattern
+    bpl .normalTitleBackgroundHue
+    lda DemoFrame+1
+    lsr                     ; carry receives DemoFrame bit 8
+    lda DemoFrame
+    ror
+    lsr
+    lsr
+    lsr
+    lsr
+    asl
+    asl
+    asl
+    asl
+    jmp .haveTitleBackgroundHue
+.normalTitleBackgroundHue
     lda Hue
+.haveTitleBackgroundHue
     ora #$02
+    and TransitionMask
     sta TitleBackground
     lda Hue
     eor #$80
     ora #$0C
+    and TransitionMask
     sta COLUPF
-    ldy #0
+    ldy TitleFrame
 .titleRow
     ldx #6                 ; repeat each source row vertically six times
 .titleLine
@@ -494,7 +888,7 @@ DrawScreen
     dex
     bne .titleLine
     iny
-    cpy #7
+    cpy TitleFrameEnd
     bne .titleRow
 
 ; -----------------------------------------------------------------------------
@@ -502,7 +896,7 @@ DrawScreen
 ; -----------------------------------------------------------------------------
 ; Clear both the playfield and background. The same clearing writes are made
 ; on every line for straightforward, stable timing.
-    ldx #6
+    ldx TitleGapCount
 .titleGap
     sta WSYNC
     lda #0
@@ -518,11 +912,61 @@ DrawScreen
 ; -----------------------------------------------------------------------------
 ; Horizontal position was already programmed by PositionPlayer during VBLANK.
 ; This kernel supplies vertical position in software because TIA has no player
-; Y register. X is the current line number from 0 through 39.
+; Y register. VBLANK has already copied the current scene's bitmap into the
+; fast SpriteBuffer. A sparse reflected playfield scrolls vertically behind it;
+; those playfield writes happen only after the time-critical GRP0 write. X is
+; the current line number from 0 through 39.
+; IntroStage values below 2 replace the region with 40 timing-identical blank
+; lines; IntroStage 2 reveals both the sprite and its starfield together.
+    lda IntroActive
+    beq .showSpriteRegion
+    lda IntroStage
+    cmp #2
+    bcs .showSpriteRegion
+    ldx #40
+.hiddenSpriteLine
+    sta WSYNC
+    dex
+    bne .hiddenSpriteLine
+    jmp .checkerStart
+.showSpriteRegion
     lda Hue
     eor #$40
     ora #$06
+    and TransitionMask
     sta COLUP0
+    lda Hue
+    eor #$20
+    ora #$0E
+    and TransitionMask
+    sta COLUPF
+    lda #1
+    sta CTRLPF
+    lda StarMode
+    beq .starsSlow
+    cmp #1
+    beq .starsMedium
+    cmp #2
+    beq .starsFast
+    lda #0
+    sec
+    sbc FrameCounter
+    lsr                     ; vertical-wave scene: medium-speed reverse drift
+    bpl .storeStarOffset
+.starsSlow
+    lda FrameCounter
+    lsr
+    lsr
+    bpl .storeStarOffset
+.starsMedium
+    lda FrameCounter
+    lsr
+    bpl .storeStarOffset
+.starsFast
+    lda FrameCounter
+.storeStarOffset
+    and #31
+    sta CheckerState         ; safe scratch until checker setup below
     ldx #0
 .spriteLine
     sta WSYNC
@@ -544,54 +988,104 @@ DrawScreen
     cmp #8
     bcs .noSprite
     tay
-    lda SpriteBitmap,y
+    lda SpriteBuffer,y
     sta GRP0
 .noSprite
+
+; Animate a 32-line sparse star map through the 40-line sprite region. The
+; bitmap repeats after 32 lines and reflection spreads 20 bits across the
+; screen. GRP0 has already been written, preserving left-edge player timing.
+    txa
+    clc
+    adc CheckerState
+    and #31
+    tay
+    lda (StarPtr0),y
+    sta PF0
+    lda (StarPtr1),y
+    sta PF1
+    lda (StarPtr2),y
+    sta PF2
     inx
     cpx #40
     bne .spriteLine
 
 ; -----------------------------------------------------------------------------
-; Animated checker playfield - 32 scanlines
+; Scene-specific animated checker grid - 32 scanlines
 ; -----------------------------------------------------------------------------
-; FrameCounter / 4, masked to one bit, chooses which checker phase starts at
-; the top. The starting phase changes every four video frames.
+.checkerStart
+; IntroStage zero reserves these 32 lines but draws black; the first milestone
+; raises it to one and enables the checker without moving later components.
+    lda IntroActive
+    beq .showCheckerRegion
+    lda IntroStage
+    cmp #1
+    bcs .showCheckerRegion
+    ldx #32
+.hiddenCheckerLine
+    sta WSYNC
+    dex
+    bne .hiddenCheckerLine
+    jmp .middleBarsStart
+.showCheckerRegion
+; ScenePattern is 0,64,128,192 for the four scenes. Dividing it by 32
+; produces table-pair bases 0,2,4,6. FrameCounter selects one of the two phases
+; in that pair, changing the starting phase every four video frames.
+    lda ScenePattern
+    lsr
+    lsr
+    lsr
+    lsr
+    lsr
+    sta CheckerState
     lda FrameCounter
     lsr
     lsr
     and #1
+    ora CheckerState
     sta CheckerState
     tay
-    lda Hue
+; CheckerHue advances once every 32 frames, half the previous grid color rate.
+    lda CheckerHue
     eor #$B0
     ora #$0A
-    sta COLUPF
-    lda Hue
+    and TransitionMask
+    sta CheckerForeground
+    lda CheckerHue
     ora #$02
-    sta COLUBK
+    and TransitionMask
+    sta CheckerBackground
 
 ; CTRLPF bit 0 reflects the 20-bit left playfield onto the right half. Unlike
 ; the title and ticker, the checker is symmetrical and needs only one set of
-; PF0/PF1/PF2 writes per scanline. Clear GRP0 and set reflection after WSYNC,
-; safely inside horizontal blank. This preserves the sprite's last row through
-; the end of line 39 and keeps the sprite-to-checker handoff below 76 cycles.
-    ldx #0
+; PF0/PF1/PF2 writes per scanline. Write the cached colors only after WSYNC so
+; they cannot recolor the right half of the preceding starfield scanline. The
+; playfield registers follow early enough for their respective left-half fetch
+; windows; GRP0 and reflection are then updated before the screen midpoint.
+    ldx #32
 .checkerLine
     sta WSYNC
-    lda #0
-    sta GRP0
-    lda #1
-    sta CTRLPF
+    lda CheckerForeground
+    sta COLUPF
+    lda CheckerBackground
+    sta COLUBK
     lda CheckerPF0,y
     sta PF0
     lda CheckerPF1,y
     sta PF1
     lda CheckerPF2,y
     sta PF2
+    lda #0
+    sta GRP0
+    lda #1
+    sta CTRLPF
 
-; Swap between the two complementary patterns every four scanlines. This makes
-; each visible checker cell four scanlines tall.
-    inx
+; Count down from 32 and swap patterns whenever the remaining count is a
+; multiple of four. This makes each visible checker cell four scanlines tall.
+; Test for zero before an otherwise-unused final phase toggle; the short exit
+; leaves enough time to prepare the first middle-raster color before its WSYNC.
+    dex
+    beq .middleBarsStart
     txa
     and #3
     bne .checkerKeep
@@ -600,23 +1094,19 @@ DrawScreen
     sta CheckerState
     tay
 .checkerKeep
-    cpx #32
-    bne .checkerLine
+    jmp .checkerLine
 
 ; -----------------------------------------------------------------------------
 ; Middle raster bars - 12 scanlines
 ; -----------------------------------------------------------------------------
-; Clear the checker and return to non-reflected mode before drawing the bars.
+.middleBarsStart
 ; ASL doubles X, so adjacent lines sample every other palette entry and produce
-; a steeper color gradient than the top bars.
-    lda #0
-    sta PF0
-    sta PF1
-    sta PF2
-    sta CTRLPF
+; a steeper color gradient than the top bars. Calculate each color before WSYNC
+; and store it at cycle 3 to keep every row aligned. Clear the checker and its
+; reflection immediately afterward, still in horizontal blank; clearing before
+; WSYNC would erase the right edge of the checker's final visible scanline.
     ldx #11
 .middleBars
-    sta WSYNC
     txa
     asl
     clc
@@ -624,14 +1114,21 @@ DrawScreen
     and #31
     tay
     lda Rainbow,y
+    and TransitionMask
+    sta WSYNC
     sta COLUBK
+    lda #0
+    sta PF0
+    sta PF1
+    sta PF2
+    sta CTRLPF
     dex
     bpl .middleBars
 
 ; -----------------------------------------------------------------------------
 ; Scrolling ticker - 5 bitmap rows * 5 scanlines = 25 scanlines
 ; -----------------------------------------------------------------------------
-; ScrollBuffer contains one complete precomputed 40-bit ticker image. Its
+; ScrollBuffer contains the current encoded 40-bit ticker image. Its
 ; 30-byte register-major layout is:
 ;
 ;      0.. 4  left PF0, one byte for each of 5 text rows
@@ -645,9 +1142,49 @@ DrawScreen
 ; Set the foreground while the playfield is zero on the last middle-bar line.
 ; The first ticker line is specialized so COLUBK changes only after WSYNC,
 ; inside horizontal blank, without shifting the right-half playfield writes.
-    lda Hue
+; Cache the first bottom-bar color now as well. The ticker's final scanline is
+; too cycle-tight to calculate it before its closing WSYNC, and calculating it
+; afterward would leave a differently colored strip at the left edge.
+; IntroStage values below 3 substitute 25 blank lines with identical height.
+    lda FrameCounter
+    clc
+    adc #18
+    and #31
+    tay
+    lda RainbowReverse,y
+    and TransitionMask
+    sta BottomBarColor
+    lda IntroActive
+    beq .showTickerRegion
+    lda IntroStage
+    cmp #3
+    bcs .showTickerRegion
+    lda #0                  ; keep the reserved scroll area black during intro
+    ldx #25
+.hiddenTickerLine
+    sta WSYNC
+    sta COLUBK
+    dex
+    bne .hiddenTickerLine
+    jmp .bottomBarsStart
+.showTickerRegion
+; Derive a 16-color hue cycle from (DemoFrame >> 5), changing the ticker text
+; once every 32 frames: four times slower than the main eight-frame hue cycle.
+    lda DemoFrame+1
+    lsr                     ; carry receives DemoFrame bit 8
+    lda DemoFrame
+    ror
+    lsr
+    lsr
+    lsr
+    lsr
+    asl
+    asl
+    asl
+    asl
     eor #$60
     ora #$0E
+    and TransitionMask
     sta COLUPF
     ldy #0
     ldx #5
@@ -706,30 +1243,36 @@ DrawScreen
 ; -----------------------------------------------------------------------------
 ; RainbowReverse gives the lower border a complementary direction. The ticker
 ; playfield bits remain latched, but assigning the same color to COLUBK and
-; COLUPF makes them invisible. Both color writes happen during horizontal blank,
-; and moving all setup after WSYNC lets the final ticker path reach the boundary
-; before cycle 76. The extra WSYNC after the loop closes the nineteenth bar
-; exactly at a scanline edge; Frame then enables VBLANK for overscan.
+; COLUPF makes them invisible. The first color was cached before the ticker;
+; later colors are calculated on the preceding line. This puts both color
+; writes safely in horizontal blank without extending the tight ticker path.
+; The extra WSYNC closes the nineteenth bar exactly at a scanline edge; Frame
+; then enables VBLANK for overscan.
+.bottomBarsStart
     ldx #18
+    lda BottomBarColor
 .bottomBars
     sta WSYNC
+    sta COLUBK
+    sta COLUPF
+    dex
+    bmi .bottomBarsDone
     txa
     clc
     adc FrameCounter
     and #31
     tay
     lda RainbowReverse,y
-    sta COLUBK
-    sta COLUPF
-    dex
-    bpl .bottomBars
+    and TransitionMask
+    jmp .bottomBars
+.bottomBarsDone
     sta WSYNC
     rts
 
 ; =============================================================================
 ; Read-only tables
 ; =============================================================================
-; ALIGN 256 moves the next byte to a page boundary ($F300 here). This keeps the
+; ALIGN 256 moves the next byte to a page boundary. This keeps the
 ; frequently indexed Rainbow tables away from a page crossing, where a 6502
 ; absolute-indexed load can take an extra cycle. Predictable timing is valuable
 ; inside a display kernel.
@@ -750,10 +1293,10 @@ RainbowReverse
     byte $22,$26,$34,$42,$50,$62,$74,$86
     byte $98,$AA,$BC,$CE,$DC,$EA,$D8,$C6
 
-; Player graphics are eight rows of eight bits. A 1 turns on a player pixel and
-; a 0 leaves the background visible. NUSIZ0 doubles each bit horizontally, but
-; the software still supplies exactly one byte per scanline.
-SpriteBitmap
+; Four scene-specific player graphics, each eight rows of eight bits. NUSIZ0
+; doubles each bit horizontally, but software still supplies one byte per line.
+SpriteBitmaps
+; Static: original alien/diamond.
     byte %00011000
     byte %00111100
     byte %01111110
@@ -762,29 +1305,257 @@ SpriteBitmap
     byte %01100110
     byte %00111100
     byte %00011000
+; Type-on/off: square digital robot.
+    byte %00111100
+    byte %01000010
+    byte %10100101
+    byte %10000001
+    byte %10111101
+    byte %10000001
+    byte %01000010
+    byte %00111100
+; Ripple: horizontally symmetric flying saucer with two landing-light rays.
+; Symmetry keeps it facing naturally when the shared bounce code reverses X.
+    byte %00011000
+    byte %00111100
+    byte %01111110
+    byte %11111111
+    byte %10111101
+    byte %01111110
+    byte %00100100
+    byte %01000010
+; Vertical wave: symmetric space jellyfish with a broad dome and four tentacles.
+; Like the UFO, its symmetry remains natural across horizontal reversals.
+    byte %00111100
+    byte %01111110
+    byte %11011011
+    byte %11111111
+    byte %11100111
+    byte %00100100
+    byte %01011010
+    byte %10000001
 
-; Two complementary 20-bit playfield patterns. CheckerState/Y selects entry 0
-; or 1 from each table. CTRLPF reflection expands the 20 bits across the screen.
-; PF0 uses only its upper four bits; PF1 and PF2 use all eight bits.
+; Four pairs of complementary 20-bit playfield patterns, one pair per scene:
+; classic checks, digital blocks, narrow ripples, and chunky bounce
+; blocks. CTRLPF reflection expands each 20-bit half across the screen. PF0
+; uses only its upper four bits; PF1 and PF2 use all eight bits.
 CheckerPF0
-    byte %10100000,%01010000
+    byte %10100000,%01010000   ; static: classic checker
+    byte %11110000,%00000000   ; type: digital blocks
+    byte %11000000,%00110000   ; ripple: narrow travelling bands
+    byte %11110000,%00000000   ; vertical wave: large chunky blocks
 CheckerPF1
     byte %10101010,%01010101
+    byte %11110000,%00001111
+    byte %11001100,%00110011
+    byte %11111111,%00000000
 CheckerPF2
     byte %01010101,%10101010
+    byte %00001111,%11110000
+    byte %00110011,%11001100
+    byte %00000000,%11111111
 
-; TIA audio "frequency" values are divider settings, not musical note numbers:
-; smaller values generally produce higher pitches. UpdateState walks both
-; 16-entry tables together, giving channel 0 a lead line and channel 1 a bass.
-Melody
-    byte 15,12,10,8,10,12,15,18,15,12,10,8,6,8,10,12
-Bass
-    byte 28,28,24,24,26,26,22,22,28,28,24,24,20,20,22,22
+; Sparse 32-line star map for the sprite region. Only a few playfield bits are
+; active on any line; vertical indexing makes them drift while reflection
+; produces a full-width field from these three compact tables.
+StarPF0
+    byte $00,$00,$10,$00,$00,$00,$80,$00
+    byte $00,$20,$00,$00,$00,$40,$00,$00
+    byte $00,$00,$00,$80,$00,$10,$00,$00
+    byte $40,$00,$00,$00,$20,$00,$00,$00
+StarPF1
+    byte $00,$04,$00,$00,$40,$00,$00,$01
+    byte $00,$00,$10,$00,$00,$00,$80,$00
+    byte $02,$00,$00,$20,$00,$00,$00,$08
+    byte $00,$80,$00,$00,$04,$00,$00,$20
+StarPF2
+    byte $20,$00,$00,$01,$00,$00,$40,$00
+    byte $00,$08,$00,$80,$00,$00,$02,$00
+    byte $00,$40,$00,$00,$10,$00,$01,$00
+    byte $08,$00,$00,$00,$80,$00,$00,$04
+
+; Plane permutations make each scene's star distribution visibly distinct.
+StarPlane0Low
+    byte <StarPF0,<StarPF1,<StarPF2,<StarPF0
+StarPlane1Low
+    byte <StarPF1,<StarPF2,<StarPF0,<StarPF2
+StarPlane2Low
+    byte <StarPF2,<StarPF0,<StarPF1,<StarPF1
+
+; Take On Me frame-driven TIA player
+;
+; The musical source is derived from Jukebox by Lloyd Russell, published as a
+; type-in for the ZX Spectrum 128K in Your Sinclair issue 21 (September 1987).
+; Its AY arrangement was reduced to a selected lead on TIA channel 0 and bass
+; on channel 1. This player is intentionally independent of the visual scene
+; counter: TakeOnMe_Update is called exactly once per 60 Hz NTSC frame.
+;
+; Each channel has its own pointer and countdown. Records contain three bytes:
+; duration in video frames, AUDF, and (AUDC << 4) | AUDV. A zero duration is an
+; end marker that resets only that channel to the beginning of its stream.
+TakeOnMe_Init
+; Point both readers at their first records. Timers start at one so the first
+; call to TakeOnMe_Update loads intentional register values immediately.
+    lda #<TakeOnMeMelody
+    sta MusicPtr0
+    lda #>TakeOnMeMelody
+    sta MusicPtr0+1
+    lda #<TakeOnMeBass
+    sta MusicPtr1
+    lda #>TakeOnMeBass
+    sta MusicPtr1+1
+    lda #1
+    sta MusicTimer0
+    sta MusicTimer1
+    lda #0
+    sta AUDV0
+    sta AUDV1
+    rts
+
+TakeOnMe_Update
+; Count each channel independently; a channel touches TIA registers only when
+; its current event expires. Most frames therefore take the short branch path.
+    dec MusicTimer0
+    bne .bass
+    jsr TakeOnMe_Load0
+.bass
+    dec MusicTimer1
+    bne .done
+    jsr TakeOnMe_Load1
+.done
+    rts
+
+TakeOnMe_Load0
+; Y selects the three fields without modifying the persistent 16-bit pointer.
+    ldy #0
+    lda (MusicPtr0),y
+    bne .event0
+    lda #<TakeOnMeMelody
+    sta MusicPtr0
+    lda #>TakeOnMeMelody
+    sta MusicPtr0+1
+    jmp TakeOnMe_Load0
+.event0
+    sta MusicTimer0
+    iny
+    lda (MusicPtr0),y
+    sta AUDF0
+    iny
+    lda (MusicPtr0),y
+    pha
+; Low nibble is volume. Preserve the packed byte on the stack, then shift its
+; high nibble down to obtain the waveform/control value.
+    and #$0F
+    sta AUDV0
+    pla
+    lsr
+    lsr
+    lsr
+    lsr
+    sta AUDC0
+; Advance the 16-bit pointer to the following three-byte record.
+    clc
+    lda MusicPtr0
+    adc #3
+    sta MusicPtr0
+    bcc .return0
+    inc MusicPtr0+1
+.return0
+    rts
+
+TakeOnMe_Load1
+; Channel 1 mirrors the decoder above but writes the bass-side TIA registers.
+    ldy #0
+    lda (MusicPtr1),y
+    bne .event1
+    lda #<TakeOnMeBass
+    sta MusicPtr1
+    lda #>TakeOnMeBass
+    sta MusicPtr1+1
+    jmp TakeOnMe_Load1
+.event1
+    sta MusicTimer1
+    iny
+    lda (MusicPtr1),y
+    sta AUDF1
+    iny
+    lda (MusicPtr1),y
+    pha
+    and #$0F
+    sta AUDV1
+    pla
+    lsr
+    lsr
+    lsr
+    lsr
+    sta AUDC1
+    clc
+    lda MusicPtr1
+    adc #3
+    sta MusicPtr1
+    bcc .return1
+    inc MusicPtr1+1
+.return1
+    rts
+
+    include "src/take_on_me_tia_data.inc"
+
+; Eight purely horizontal ripple phases, seven rows each.
+RippleFrameOffsets
+    byte 0,7,14,21,28,35,42,49
+
+; Five reveal phases follow, displaying 0, 2, 4, 6, or 8 letters. Repeated
+; offsets preserve the type-on/type-off scene's 16-frame phase rhythm.
+RevealFrameOffsets
+    byte 56,56,63,63,70,70,77,77,84,84,77,77,70,70,63,63
+
+; Four independent-letter vertical-wave phases occupy the final table rows.
+VerticalFrameOffsets
+    byte 91,98,105,112
+
+; The three introduction milestones are 256 frames apart: grid at 256,
+; sprite/starfield at 512, and ticker at 768. Scene 2 begins as soon as the
+; fourth 256-frame reveal stage ends at visual counter $0400.
+IntroMilestoneLow
+    byte $00,$00,$00
+IntroMilestoneHigh
+    byte $01,$02,$03
+
+; Start each 256-frame transition 128 frames before a scene boundary.
+TransitionStartLow
+    byte $80,$80,$80,$80    ; 896, 1920, 2944, and 3968 frames
+TransitionStartHigh
+    byte $03,$07,$0B,$0F
+
+; Luminance masks for half-countdown indices 0..127. The masks progressively
+; remove the TIA's three luminance bits, hold the picture dark across the scene
+; switch, and restore those bits in reverse. UpdateTransition derives the same
+; 0..127 range from both halves of its 256-frame countdown. Hue bits are always
+; preserved, and $FE is effectively full brightness because NTSC TIA colors
+; use even luminance values.
+TransitionMasks
+    byte $FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE
+    byte $FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE
+    byte $FC,$FC,$FC,$FC,$FC,$FC,$FC,$FC
+    byte $FC,$FC,$FC,$FC,$FC,$FC,$FC,$FC
+    byte $F8,$F8,$F8,$F8,$F8,$F8,$F8,$F8
+    byte $F8,$F8,$F8,$F8,$F8,$F8,$F8,$F8
+    byte $F0,$F0,$F0,$F0,$F0,$F0,$F0,$F0
+    byte $F0,$F0,$F0,$F0,$F0,$F0,$F0,$F0
+    byte $F0,$F0,$F0,$F0,$F0,$F0,$F0,$F0
+    byte $F0,$F0,$F0,$F0,$F0,$F0,$F0,$F0
+    byte $F8,$F8,$F8,$F8,$F8,$F8,$F8,$F8
+    byte $F8,$F8,$F8,$F8,$F8,$F8,$F8,$F8
+    byte $FC,$FC,$FC,$FC,$FC,$FC,$FC,$FC
+    byte $FC,$FC,$FC,$FC,$FC,$FC,$FC,$FC
+    byte $FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE
+    byte $FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE
 
 ; The Python asset tool creates:
 ;
-;   - six 7-byte title tables (left/right PF0, PF1, PF2)
-;   - all 30-byte animation frames for the scrolling ticker
+;   - six 119-byte title tables (8 ripple, 5 reveal, 4 vertical-wave phases)
+;   - one 30-byte initial ticker window
+;   - one compact five-bit byte for each ticker source column
 ;
 ; It is generated during the build so build/assets.inc should not be edited by
 ; hand. Change tools/gen_assets.py instead.

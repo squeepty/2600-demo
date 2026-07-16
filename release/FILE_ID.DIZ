@@ -1,5 +1,11 @@
-SQUEEPTY 2600 Demo (2026)
-4K NTSC Atari 2600 demo.
-Raster bars, bouncing sprite,
-checkerboard and TIA tune.
-No controls. Run in Stella.
+The Teeny-tiny Atari 2600 demo (2026)
+Released Thursday, July 16, 2026.
+4K / 4096-byte NTSC Atari 2600 demo.
+Four title scenes with raster bars, stars,
+checker grids, bouncing sprites and ticker.
+Take On Me TIA soundtrack, derived from
+Jukebox by Lloyd Russell; published in
+Your Sinclair issue 21, September 1987,
+for the ZX Spectrum 128K.
+Automatic demo; no controls.
+Run in Stella.
